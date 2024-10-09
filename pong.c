@@ -1,17 +1,26 @@
 #include <SDL2/SDL.h>
 #include <SDL2_ttf/SDL_ttf.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 
 #define PADDLE_HEIGHT 100
 #define PADDLE_WIDTH 20
 
 #define BALL_SIZE 15
+#define BALL_SLOW 0.2
+#define BALL_MEDIUM 0.5
+#define BALL_FAST 1
+
+#define BALL_SHARP 0.3
+#define BALL_FLAT 0.1
 
 #define BOUNDARY_SIZE 15
 
 #define SCREEN_WIDTH 800
 #define SCREEN_HEIGHT 600
+
+#define MAX_SCORE 10
 
 typedef struct {
   float x, y;
@@ -30,7 +39,23 @@ typedef struct {
   int aiScore;
 } Score;
 
-static void move_ball(Ball *ball, Paddle *paddleLeft, Paddle *paddleRight) {
+typedef struct {
+  double dy, dx;
+} Vector;
+
+typedef enum { HOME, PLAYING, GAME_OVER } GameState;
+
+static Vector calcBounceVector(double angle, double speed) {
+  double theta = angle * (M_PI / 180);
+
+  double dy = speed * sin(theta);
+  double dx = speed * cos(theta);
+
+  Vector vec = {dy, dx};
+  return vec;
+}
+
+static void moveBall(Ball *ball, Paddle *paddleLeft, Paddle *paddleRight) {
   ball->x += ball->dx;
   ball->y += ball->dy;
 
@@ -53,7 +78,33 @@ static void move_ball(Ball *ball, Paddle *paddleLeft, Paddle *paddleRight) {
       if (ball->y + ball->size >= paddle->y &&
           ball->y <= paddle->y + paddle->height) {
         // Reverse the ball's horizontal direction
-        ball->dx = -ball->dx;
+        int dx_mult = ball->dx < 0 ? 1 : -1;
+        // int slope_mult = (ball->dy / ball->dx) < 0 ? -1 : 1;
+
+        // How far away the ball is from the tip of the paddle
+        const float offsetPercent = (ball->y - paddle->y) / paddle->height;
+
+        // Hit the ball at the top, set the direction upwards
+        if (offsetPercent < 0.2) {
+          Vector vec = calcBounceVector(35, 1);
+          ball->dx = dx_mult * vec.dx;
+          ball->dy = -vec.dy;
+        } else if (offsetPercent >= 0.2 &&
+                   offsetPercent < 0.8)  // ball in the middle
+        {
+          Vector vec = calcBounceVector(10, 0.5);
+
+          if (offsetPercent < 0.5) {
+            vec.dy *= -1;
+          }
+          ball->dx = dx_mult * vec.dx;
+          ball->dy = vec.dy;
+        } else  // ball at the end
+        {
+          Vector vec = calcBounceVector(35, 1);
+          ball->dx = dx_mult * vec.dx;
+          ball->dy = vec.dy;
+        }
 
         // Adjust ball's position slightly to prevent sticking
         if (ball->dx > 0) {  // Ball moving right
@@ -87,7 +138,14 @@ static void movePaddleDown(Paddle *paddle) {
 static void moveAiPaddle(Paddle *paddle, Ball *ball) {
   // Check if the ball is moving towards the AI's paddle
   if (ball->dx > 0) {
-    return;
+    // Try to move the paddle towards the center
+    const int center = (SCREEN_HEIGHT / 2) - (paddle->height / 2);
+
+    if (paddle->y < center) {
+      movePaddleDown(paddle);
+    } else {
+      movePaddleUp(paddle);
+    }
   }
 
   // Try to match the y coordinate of the ball
@@ -120,10 +178,23 @@ static void initBall(Ball *ball) {
   ball->x = SCREEN_WIDTH / 2 - BALL_SIZE / 2;
   ball->y = SCREEN_HEIGHT / 2 - BALL_SIZE / 2;
 
-  const float speed = 0.2;
+  // Initialize serve to either player,
+  // with an angle between 10 and 20
+  int startAngle = (rand() % 10) + 10;
+  Vector vec = calcBounceVector(startAngle, BALL_SLOW);
 
-  ball->dx = (rand() % 2 == 0) ? speed : -speed;
-  ball->dy = (rand() % 2 == 0) ? speed : -speed;
+  // Randomize going to left or right
+  if (rand() % 2 == 0) {
+    vec.dx *= -1;
+  }
+
+  // Randomize going up or down
+  if (rand() % 2 == 0) {
+    vec.dy *= -1;
+  }
+
+  ball->dx = vec.dx;
+  ball->dy = vec.dy;
 }
 
 static void initPaddle(Paddle *paddle, int isLeft) {
@@ -201,10 +272,16 @@ static void reset(Ball *ball, Paddle *paddleLeft, Paddle *paddelRight) {
   initPaddle(paddelRight, 0);
 }
 
-typedef enum { ALIGN_LEFT, ALIGN_RIGHT } TextAlignment;
+typedef enum { ALIGN_LEFT, ALIGN_CENTER, ALIGN_RIGHT } TextAlignment;
 
-static void drawText(SDL_Renderer *renderer, TTF_Font *font, int x, int y,
+static void drawText(SDL_Renderer *renderer, int fontSize, int x, int y,
                      const char *text, TextAlignment alignment) {
+  TTF_Font *font = TTF_OpenFont("megamax_font.ttf", fontSize);
+  if (font == NULL) {
+    printf("Failed to load font! SDL_ttf error: %s\n", TTF_GetError());
+    TTF_Quit();
+  }
+
   SDL_Color color = {255, 255, 255, 255};
   SDL_Surface *surface = TTF_RenderText_Solid(font, text, color);
   SDL_Texture *texture = SDL_CreateTextureFromSurface(renderer, surface);
@@ -213,12 +290,32 @@ static void drawText(SDL_Renderer *renderer, TTF_Font *font, int x, int y,
 
   if (alignment == ALIGN_RIGHT) {
     textRect.x = x - surface->w;
+  } else if (alignment == ALIGN_CENTER) {
+    textRect.x = x - surface->w / 2;
   }
 
   SDL_RenderCopy(renderer, texture, NULL, &textRect);
 
   SDL_FreeSurface(surface);
   SDL_DestroyTexture(texture);
+
+  TTF_CloseFont(font);
+}
+
+typedef enum { WINNER_LEFT, WINNER_RIGHT } Winner;
+
+static void drawWinnerScreen(SDL_Renderer *renderer, Winner winner) {
+  int x;
+  int y = BOUNDARY_SIZE + 75;
+  if (winner == WINNER_LEFT) {
+    x = SCREEN_WIDTH / 6;
+  } else {
+    x = SCREEN_WIDTH * 0.6;
+  }
+
+  // Draw the winner box with text
+  drawText(renderer, 32, x, y, "Winner!", ALIGN_LEFT);
+  drawText(renderer, 16, x, y + 48, "Press R to restart", ALIGN_LEFT);
 }
 
 int main(void) {
@@ -228,6 +325,7 @@ int main(void) {
   // The surface contained by the window
   SDL_Renderer *renderer = NULL;
 
+  SDL_SetHint(SDL_HINT_TIMER_RESOLUTION, "1");
   // Initialize SDL
   if (SDL_Init(SDL_INIT_VIDEO) < 0) {
     printf("SDL could not initialize! SDL_Error: %s\n", SDL_GetError());
@@ -237,14 +335,6 @@ int main(void) {
   // Initialize SDL_ttf
   if (TTF_Init() < 0) {
     printf("SDL_ttf could not initialize! SDL_ttf error: %s\n", TTF_GetError());
-    SDL_Quit();
-    return 1;
-  }
-
-  TTF_Font *font = TTF_OpenFont("megamax_font.ttf", 48);
-  if (font == NULL) {
-    printf("Failed to load font! SDL_ttf error: %s\n", TTF_GetError());
-    TTF_Quit();
     SDL_Quit();
     return 1;
   }
@@ -285,6 +375,8 @@ int main(void) {
 
   const Uint8 *keyState = SDL_GetKeyboardState(NULL);
 
+  GameState state = HOME;
+
   srand(time(NULL));
 
   while (!quit) {
@@ -295,23 +387,38 @@ int main(void) {
       } else if (e.type == SDL_KEYDOWN) {
         switch (e.key.keysym.sym) {
           case SDLK_r:
-            reset(&ball, &paddleLeft, &paddleRight);
+            if (state == GAME_OVER) {
+              reset(&ball, &paddleLeft, &paddleRight);
+              state = PLAYING;
+              score.aiScore = 0;
+              score.playerScore = 0;
+            }
+            // No break because any key can start the game
+          default:
+            if (state == HOME) {
+              state = PLAYING;
+            }
         }
       }
     }
 
-    if (keyState[SDL_SCANCODE_UP]) {
-      movePaddleUp(&paddleRight);
-    } else if (keyState[SDL_SCANCODE_DOWN]) {
-      movePaddleDown(&paddleRight);
-    }
+    if (state == PLAYING) {
+      if (keyState[SDL_SCANCODE_UP]) {
+        movePaddleUp(&paddleRight);
+      } else if (keyState[SDL_SCANCODE_DOWN]) {
+        movePaddleDown(&paddleRight);
+      }
 
-    move_ball(&ball, &paddleLeft, &paddleRight);
-    moveAiPaddle(&paddleLeft, &ball);
+      moveBall(&ball, &paddleLeft, &paddleRight);
+      moveAiPaddle(&paddleLeft, &ball);
 
-    if (updateScore(&ball, &score)) {
-      printf("CPU: %d  Player: %d\n", score.aiScore, score.playerScore);
-      reset(&ball, &paddleLeft, &paddleRight);
+      if (updateScore(&ball, &score)) {
+        if (score.aiScore == MAX_SCORE || score.playerScore == MAX_SCORE) {
+          state = GAME_OVER;
+        } else {
+          reset(&ball, &paddleLeft, &paddleRight);
+        }
+      }
     }
 
     /******** Draw updated state to the screen  *********/
@@ -321,28 +428,42 @@ int main(void) {
     // Clear screen
     SDL_RenderClear(renderer);
 
-    // Draw the boundaries
-    drawBoundaries(renderer);
+    if (state == HOME) {
+      double x = SCREEN_WIDTH / 2;
+      double y = SCREEN_HEIGHT / 2 - 50;
+      drawText(renderer, 48, x, y, "Pong", ALIGN_CENTER);
+      drawText(renderer, 24, x, y + 48, "Press any key to start", ALIGN_CENTER);
+    }
 
-    // Draw the net
-    drawNet(renderer);
+    else if (state == PLAYING || state == GAME_OVER) {
+      // Draw the boundaries
+      drawBoundaries(renderer);
 
-    // Draw the paddles
-    drawPaddle(renderer, &paddleLeft);
-    drawPaddle(renderer, &paddleRight);
+      // Draw the net
+      drawNet(renderer);
 
-    // Draw the ball
-    drawBall(renderer, &ball);
+      // Draw the paddles
+      drawPaddle(renderer, &paddleLeft);
+      drawPaddle(renderer, &paddleRight);
 
-    // Draw the score
-    char playerScoreText[8];
-    char aiScoreText[8];
-    sprintf(playerScoreText, "%d", score.playerScore);
-    sprintf(aiScoreText, "%d", score.aiScore);
-    drawText(renderer, font, SCREEN_WIDTH / 2 - 50, BOUNDARY_SIZE + 20,
-             aiScoreText, ALIGN_RIGHT);
-    drawText(renderer, font, SCREEN_WIDTH / 2 + 50, BOUNDARY_SIZE + 20,
-             playerScoreText, ALIGN_LEFT);
+      if (state == PLAYING) {
+        // Draw the ball
+        drawBall(renderer, &ball);
+      } else {
+        drawWinnerScreen(
+            renderer, score.aiScore == MAX_SCORE ? WINNER_LEFT : WINNER_RIGHT);
+      }
+
+      // Draw the score
+      char playerScoreText[8];
+      char aiScoreText[8];
+      sprintf(playerScoreText, "%d", score.playerScore);
+      sprintf(aiScoreText, "%d", score.aiScore);
+      drawText(renderer, 48, SCREEN_WIDTH / 2 - 50, BOUNDARY_SIZE + 20,
+               aiScoreText, ALIGN_RIGHT);
+      drawText(renderer, 48, SCREEN_WIDTH / 2 + 50, BOUNDARY_SIZE + 20,
+               playerScoreText, ALIGN_LEFT);
+    }
 
     // Update screen
     SDL_RenderPresent(renderer);
